@@ -1,0 +1,37 @@
+Firefox Sync Client
+Mike Rowehl (mikerowehl@gmail.com)
+
+I've been looking for ways to get the data out of my browser to do additional
+stuff with it, like sync up the stuff I've already read across mobile and
+desktop with my Google Reader account and check off stuff I've already seen.
+Or providing a way to grep through the text of all the pages I've browsed
+recently. It really needs to include my mobile browsing to be useful for me
+though.
+
+I started poking around with Chrome Sync and Firefox Sync, and was really
+happy about Firefox Sync keeping history synced up between desktop and mobile.
+Hackery ensued. Lots has changed in the sync service recently. I did a bunch
+of poking around in the 4.0 beta release source code, and changing around my
+own weave_minimal server install, and reading threads in the mailing list. I 
+finally got something that consistently pulls data out of the Firefox Sync
+servers though!
+
+All the main program does currently is yank the history list for a user and
+print out the URLs, but it's a start.  There are a few bits of info you'll
+need to get your own data out:
+
+- the username (which the current betas force to email address) and password
+- your sync key, which you can find in the sync pane under Preferences
+- the weave node your account is assigned to
+
+You can find the weave node using the node_lookup.php program. ie:
+
+  miker-air:firefox_sync_client mikerowehl$ php ./node_lookup.php mikerowehl@gmail.com
+  Querying https://auth.services.mozilla.com/user/1.0/5dxur6wmsmd4esj4edssy7kdrsjgvpqf/node/weave
+  Node endpoint: https://phx-sync462.services.mozilla.com/
+
+Once you have that endpoint you can run the sync program to dump your history:
+
+  miker-air:firefox_sync_client mikerowehl$ php ./sync.php mikerowehl@gmail.com secretpass a-bbbbb-ccccc-ddddd-eeeee-fffff https://phx-sync462.services.mozilla.com/
+
+And you should get a list of URLs back from your online history list.
