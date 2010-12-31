@@ -16,13 +16,14 @@ own weave_minimal server install, and reading threads in the mailing list. I
 finally got something that consistently pulls data out of the Firefox Sync
 servers though!
 
-All the main program does currently is yank the history list for a user and
-print out the URLs, but it's a start.  There are a few bits of info you'll
+All the main program does currently is yank a collection for the server and
+dump out the info, but it's a start.  There are a few bits of info you'll
 need to get your own data out:
 
 - the username (which the current betas force to email address) and password
 - your sync key, which you can find in the sync pane under Preferences
 - the weave node your account is assigned to
+- the name of the collection to dump (ie. 'history' or 'bookmarks')
 
 You can find the weave node using the node_lookup.php program. ie:
 
@@ -32,6 +33,6 @@ You can find the weave node using the node_lookup.php program. ie:
 
 Once you have that endpoint you can run the sync program to dump your history:
 
-  miker-air:firefox_sync_client mikerowehl$ php ./sync.php mikerowehl@gmail.com secretpass a-bbbbb-ccccc-ddddd-eeeee-fffff https://phx-sync462.services.mozilla.com/
+  miker-air:firefox_sync_client mikerowehl$ php ./sync.php mikerowehl@gmail.com secretpass a-bbbbb-ccccc-ddddd-eeeee-fffff https://phx-sync462.services.mozilla.com/ bookmarks
 
-And you should get a list of URLs back from your online history list.
+And you should get back a dump of the data from that collection.

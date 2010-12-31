@@ -53,12 +53,12 @@
 #
 # ***** END LICENSE BLOCK *****
 
-require_once('username_munge.php');
+require_once('sync.php');
 
 $garbage = array_shift($argv); // this is the name of the script
 
 // We definitely need a username
-$username = username_munge(array_shift($argv));
+$username = Firefox_Sync::username_munge(array_shift($argv));
 
 // This hostname will work by default for the mozilla service, so only need to
 // include a second argument if you want to hit your own sync server

@@ -57,107 +57,154 @@
 #
 # ***** END LICENSE BLOCK *****
 
-require_once('username_munge.php');
+require_once('base32.php');
 
-// Outupt to stderr, cause this is a command line tool.
-function error($message) {
-    file_put_contents('php://stderr', $message . "\n");
-}
+class Firefox_Sync {
+    private $username = null;
+    private $password = null;
+    private $sync_key = null;
+    private $base_url = null;
+    private $bulk_keys = null;
+    private $protocol_version = '1.0';
 
-function http_fetch($url, $u, $p) {
-    $h = curl_init($url);
-    curl_setopt($h, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($h, CURLOPT_USERPWD, $u . ':' . $p);
-    curl_setopt($h, CURLOPT_SSL_VERIFYPEER, false);
-
-    $r = curl_exec($h);
-    $headers = curl_getinfo($h);
-    curl_close($h);
-
-    if ($headers['http_code'] != 200) {
-        error($headers['http_code'] . " http response to $url:");
-        error("  response body: $r");
-        return null;
+    public function __construct($username, $password, $sync_key, $base_url) {
+        $this->set_credentials($username, $password);
+        $this->set_sync_key($sync_key);
+        $this->set_base_url($base_url);
     }
 
-    return $r;
-}
-
-// This is described somewhat in the simple encryption document at Mozilla.
-// The sync key as presented to the user is kinda sorta a base32 encoded
-// binary value. It's been converted to lowercase, and an l characters were
-// replaced with 8, and any o characters replaced with 9. So we need to get
-// it into shape where we can recover the binary value. And then we need to
-// run it through an hmac digest used to generate the symmetric encryption
-// key we can use to decrypt stuff.
-function sync_key_to_enc_key($sync_key, $username) {
-    $sync_key = strtr($sync_key, array('8' => 'l', '9' => 'o', '-' => ''));
-    $sync_key = strtoupper($sync_key);
-    $raw_bits = base32_decode($sync_key);
-    $key = hash_hmac("sha256", 'Sync-AES_256_CBC-HMAC256' . $username . chr(0x01), $raw_bits, true);
-    return $key;
-}
-
-// Decrypt using a symmetric key. There's some junk tacked onto the end of
-// the decrypted text, so trim the returned string down to just printable
-// characters. Not sure why that happens, but I found the same thing in some
-// code from Mozilla, so I'm pretty sure it's not just me flubbing the crypto
-// setup in some way. The payload should be an object with base64 encoded
-// ciphertext and IV members, which is what comes back in the records from the
-// sync server.
-function decrypt_payload($payload, $key) {
-    $c = mcrypt_module_open(MCRYPT_RIJNDAEL_128, '', MCRYPT_MODE_CBC, '');
-    mcrypt_generic_init($c, $key, base64_decode($payload->IV));
-    $data = mdecrypt_generic($c, base64_decode($payload->ciphertext));
-
-    $t = strrchr($data, '}');
-    if ($t) {
-        $data = substr($data, 0, 0 - (strlen($t)-1));
+    public function set_credentials($username, $password) {
+        $this->username = self::username_munge($username);
+        $this->password = $password;
     }
-    return $data;
+
+    public function set_sync_key($sync_key) {
+        $this->sync_key = $sync_key;
+    }
+
+    public function set_base_url($base_url) {
+        $this->base_url = $base_url;
+        if (substr($this->base_url, -1) != '/') {
+            $this->base_url .= '/';
+        }
+        $this->base_url .=
+            ($this->protocol_version . '/' . $this->username . '/');
+    }
+
+    public function collection_full($collection) {
+        if ($this->bulk_keys === null) {
+            $this->fetch_bulk_keys();
+        }
+
+        $r = array();
+        $items = $this->fetch_json($this->base_url . 'storage/' . $collection .
+            '?full=1');
+        foreach ($items as $item) {
+            $r[] = json_decode($this->c_decrypt(json_decode($item->payload), $collection));
+        }
+        return $r;
+    }
+
+    // If the username includes anything except URL characters, use the base32
+    // encoded version of the sha1 of the name. That's too simple though.. so 
+    // also lowercase the base32 once we get it back.
+    // Static and public so that we can call this from other utilities that
+    // require just a mucked up version of the username for things like 
+    // constructing a URL.
+    public static function username_munge($username) {
+        if (preg_match('/[^A-Z0-9._-]/i', $username)) {
+            $username = strtolower(base32_encode(sha1(strtolower($username), true)));
+        }
+        return $username;
+    }
+
+    // This is described somewhat in the simple encryption document at Mozilla.
+    // The sync key as presented to the user is kinda sorta a base32 encoded
+    // binary value. It's been converted to lowercase, and an l characters were
+    // replaced with 8, and any o characters replaced with 9. So we need to get
+    // it into shape where we can recover the binary value. And then we need to
+    // run it through an hmac digest used to generate the symmetric encryption
+    // key we can use to decrypt stuff.
+    private function sync_key_to_enc_key() {
+        $t = strtr($this->sync_key, array('8' => 'l', '9' => 'o', '-' => ''));
+        $t = strtoupper($t);
+        $raw_bits = base32_decode($t);
+        $key = hash_hmac("sha256",
+            'Sync-AES_256_CBC-HMAC256' . $this->username . chr(0x01),
+            $raw_bits, true);
+        return $key;
+    }
+
+    // Use the symmetric key generated from the sync_key to fetch the
+    // crypto/keys collection, which has the default bulk key and any
+    // collection specific keys.
+    private function fetch_bulk_keys() {
+        $json = $this->fetch_json($this->base_url . 'storage/crypto/keys');
+        $keys = $this->c_decrypt(json_decode($json->payload), 'crypto');
+        $default_keys = json_decode($keys);
+        $this->bulk_keys = array('default' => 
+            base64_decode($default_keys->default[0]));
+    }
+
+    // Decrypt using a symmetric key. There's some junk tacked onto the end of
+    // the decrypted text, so trim the returned string down to just printable
+    // characters. Not sure why that happens, but I found the same thing in
+    // some code from Mozilla, so I'm pretty sure it's not just me flubbing the
+    // crypto setup in some way. The payload should be an object with base64
+    // encoded ciphertext and IV members, which is what comes back in the
+    // records from the sync server.
+    private function decrypt_payload($payload, $key) {
+        $c = mcrypt_module_open(MCRYPT_RIJNDAEL_128, '', MCRYPT_MODE_CBC, '');
+        mcrypt_generic_init($c, $key, base64_decode($payload->IV));
+        $data = mdecrypt_generic($c, base64_decode($payload->ciphertext));
+
+        $t = strrchr($data, '}');
+        if ($t) {
+            $data = substr($data, 0, 0 - (strlen($t)-1));
+        }
+        return $data;
+    }
+
+    // Collection decrypt. Lookup the collection in the bulk keys list and
+    // find the relevant key to use. There's a special case for the crypto
+    // collection, which uses a key based off a transform of the sync key.
+    private function c_decrypt($payload, $collection) {
+        if ($collection == 'crypto') {
+            $key = $this->sync_key_to_enc_key($this->sync_key,
+                $this->username);
+        } else {
+            if (array_key_exists($collection, $this->bulk_keys)) {
+                $key = $this->bulk_keys[$collection];
+            } else {
+                $key = $this->bulk_keys['default'];
+            }
+        }
+        return $this->decrypt_payload($payload, $key);
+    }
+
+    // Lots of json unwrappering to do all over the place, so define an http
+    // fetch function that applies at least one of the levels of unwrapping
+    // for us
+    private function fetch_json($url) {
+        return json_decode($this->fetch($url));
+    }
+
+    private function fetch($url) {
+        $h = curl_init($url);
+        curl_setopt($h, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($h, CURLOPT_USERPWD,
+            $this->username . ':' . $this->password);
+        curl_setopt($h, CURLOPT_SSL_VERIFYPEER, false);
+
+        $r = curl_exec($h);
+        $headers = curl_getinfo($h);
+        curl_close($h);
+
+        if ($headers['http_code'] != 200) {
+            throw new Exception('' . $headers['http_code'] . " resp $url");
+        }
+
+        return $r;
+    }
 }
 
-// Ghetto arg parsing, we need at least 4 things:
-//   username - username for http auth
-//   password - password for http auth
-//   sync_key - the key used to start unwrapping encryption
-//   url_base - the url where the sync server lives
-//
-// The username and password are used to fetch http resources from the server,
-// these come in the form of JSON responses generally.  However, the fields
-// within the JSON responses are encrypted using a series of keys.  The
-// process starts off from a shared private key called the sync key.  On
-// desktop Firefox you can get this from Preferences - Sync - Manage Account -
-// My Sync Key. It should look something like this:
-//   x-xxxxx-xxxxx-xxxxx-xxxxx-xxxxx
-// Where each x is an alphanumeric (this is a base32 encoded key actually)
-//
-// The url is the base path used by the weave server, the sync service. If
-// you're using Mozilla's public sync servers you can figure out the server 
-// to use by running 'node_lookup.php' to get the URL. If you're
-// running your own sync server it's just the base of the install, same as
-// you used for the services.sync.serverURL setting in Firefox.
-
-$garbage = array_shift($argv); // script name, discard
-$username = username_munge(array_shift($argv));
-$password = array_shift($argv);
-$sync_key = array_shift($argv);
-$url_base = array_shift($argv);
-
-$data = http_fetch($url_base . '1.0/' . $username . '/storage/crypto/keys', $username, $password);
-$json = json_decode($data);
-$payload = json_decode($json->payload);
-
-$key = sync_key_to_enc_key($sync_key, $username);
-$key_json = decrypt_payload($payload, $key);
-$default_keys = json_decode($key_json);
-$default_enc_key = base64_decode($default_keys->default[0]);
-
-$history = http_fetch($url_base . '1.0/' . $username . '/storage/history?full=1', $username, $password);
-
-$history_items = json_decode($history);
-foreach ($history_items as $item) {
-    $r = decrypt_payload(json_decode($item->payload), $default_enc_key);
-    $h = json_decode($r);
-    echo $h->histUri . "\n";
-}
